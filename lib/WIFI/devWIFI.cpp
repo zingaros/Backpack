@@ -380,9 +380,14 @@ static void WebUpdateSetHome(AsyncWebServerRequest *request)
   String ssid = request->arg("network");
   String password = request->arg("password");
 
-  DBGLN("Setting home network %s", ssid.c_str());
-  strcpy(station_ssid, ssid.c_str());
-  strcpy(station_password, password.c_str());
+  if (ssid.length() >= sizeof(station_ssid) || password.length() >= sizeof(station_password)) {
+    request->send(400, "text/plain", "Network name or password is too long");
+    return;
+  }
+
+  DBGLN("Setting home network");
+  strlcpy(station_ssid, ssid.c_str(), sizeof(station_ssid));
+  strlcpy(station_password, password.c_str(), sizeof(station_password));
   // Only save to config if we don't have a flashed wifi network
   if (firmwareOptions.home_wifi_ssid[0] == 0) {
     config.SetSSID(ssid.c_str());
@@ -636,15 +641,21 @@ static void startWiFi(unsigned long now)
   if (wifiStarted) {
     return;
   }
+  #if !defined(AAT_PERF_DEBUG) && !defined(AAT_COMPASS_TRACKING)
   if (connectionState < FAILURE_STATES) {
     connectionState = wifiUpdate;
   }
+  #endif
 
   DBGLN("Begin Webupdater");
 
   WiFi.persistent(false);
   WiFi.disconnect();
+#if defined(AAT_PERF_DEBUG) || defined(AAT_COMPASS_DEBUG)
+  WiFi.mode(WIFI_STA);
+#else
   WiFi.mode(WIFI_OFF);
+#endif
   #if defined(PLATFORM_ESP8266)
     WiFi.setOutputPower(20.5);
     WiFi.setPhyMode(WIFI_PHY_MODE_11N);
@@ -659,6 +670,10 @@ static void startWiFi(unsigned long now)
     strcpy(station_ssid, config.GetSSID());
     strcpy(station_password, config.GetPassword());
   }
+#if defined(AAT_PERF_DEBUG) || (defined(AAT_COMPASS_DEBUG) && !defined(AAT_COMPASS_DEBUG_USE_HOME_WIFI))
+  changeTime = now;
+  changeMode = WIFI_AP;
+#else
   if (station_ssid[0] == 0) {
     changeTime = now;
     changeMode = WIFI_AP;
@@ -667,6 +682,7 @@ static void startWiFi(unsigned long now)
     changeTime = now;
     changeMode = WIFI_STA;
   }
+#endif
   laststatus = WL_NO_SHIELD;
   wifiStarted = true;
 }
@@ -745,6 +761,7 @@ static void startServices()
   server.on("/config", HTTP_GET, GetConfiguration);
   server.on("/networks.json", WebUpdateSendNetworks);
   server.on("/sethome", WebUpdateSetHome);
+  server.on("/sethome", HTTP_POST, WebUpdateSetHome);
   #if defined(MAVLINK_ENABLED)
   server.on("/setmavlink", WebUpdateSetMavLink);
   #endif
@@ -831,6 +848,8 @@ static void HandleWebUpdate()
         wifiMode = WIFI_AP;
         #if defined(PLATFORM_ESP8266)
           WiFi.mode(WIFI_AP_STA);
+        #elif defined(AAT_PERF_DEBUG) || defined(AAT_COMPASS_DEBUG)
+          WiFi.mode(WIFI_AP_STA);
         #else
           WiFi.mode(WIFI_AP);
         #endif
@@ -859,7 +878,7 @@ static void HandleWebUpdate()
         #endif
         break;
       case WIFI_STA:
-        DBGLN("Connecting to home network '%s' '%s'", station_ssid, station_password);
+        DBGLN("Connecting to home network '%s'", station_ssid);
         wifiMode = WIFI_STA;
         WiFi.mode(wifiMode);
         WiFi.setHostname(myHostname); // hostname must be set after the mode is set to STA
@@ -1000,12 +1019,14 @@ static int start()
 
 static int event()
 {
-  if (connectionState == wifiUpdate || connectionState > FAILURE_STATES)
+#if defined(AAT_PERF_DEBUG) || defined(AAT_COMPASS_DEBUG)
+  if (!wifiStarted)
+#else
+  if ((connectionState == wifiUpdate || connectionState > FAILURE_STATES) && !wifiStarted)
+#endif
   {
-    if (!wifiStarted) {
-      startWiFi(millis());
-      return DURATION_IMMEDIATELY;
-    }
+    startWiFi(millis());
+    return DURATION_IMMEDIATELY;
   }
   return DURATION_IGNORE;
 }

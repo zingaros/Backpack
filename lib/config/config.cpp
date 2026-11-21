@@ -1,4 +1,7 @@
 #include "config.h"
+#include "aat_config_defaults.h"
+#include "aat_config_migration.h"
+#include "aat_config_validation.h"
 #include "logging.h"
 
 #if defined(TARGET_TX_BACKPACK)
@@ -130,16 +133,80 @@ VrxBackpackConfig::Load()
 {
     // Populate the struct from eeprom
     m_eeprom->Get(0, m_config);
+    m_modified = false;
 
-    // Check if version number matches
-    if (m_config.version != (uint32_t)(VRX_BACKPACK_CONFIG_VERSION | VRX_BACKPACK_CONFIG_MAGIC))
+    const uint32_t versionV5 = VRX_BACKPACK_CONFIG_VERSION_V5 | VRX_BACKPACK_CONFIG_MAGIC;
+    const uint32_t versionV6 = VRX_BACKPACK_CONFIG_VERSION_V6 | VRX_BACKPACK_CONFIG_MAGIC;
+    const uint32_t versionV7 = VRX_BACKPACK_CONFIG_VERSION_V7 | VRX_BACKPACK_CONFIG_MAGIC;
+    const uint32_t versionV8 = VRX_BACKPACK_CONFIG_VERSION_V8 | VRX_BACKPACK_CONFIG_MAGIC;
+    const uint32_t versionV9 = VRX_BACKPACK_CONFIG_VERSION_V9 | VRX_BACKPACK_CONFIG_MAGIC;
+#if defined(AAT_BACKPACK)
+    const uint32_t versionV10 = VRX_BACKPACK_CONFIG_VERSION_V10 | VRX_BACKPACK_CONFIG_MAGIC;
+#endif
+    const uint32_t versionCurrent = VRX_BACKPACK_CONFIG_VERSION | VRX_BACKPACK_CONFIG_MAGIC;
+    bool migrated = false;
+#if defined(AAT_BACKPACK)
+    migrated = AatConfigMigration::migrateAatVrxV5(m_config, versionV5, versionV8,
+        AatConfigDefaults::PAN_SERVO_NEUTRAL_US);
+    if (!migrated)
+        migrated = AatConfigMigration::migrateAatVrxV6(m_config, versionV6, versionV8);
+    if (!migrated)
+        migrated = AatConfigMigration::migrateAatVrxV7(m_config, versionV7, versionV8);
+#else
+    migrated = AatConfigMigration::migrateVrxV5(m_config, versionV5, versionV8);
+    if (!migrated)
+        migrated = AatConfigMigration::migrateVrxV6(m_config, versionV6, versionV8);
+    if (!migrated)
+        migrated = AatConfigMigration::migrateVrxV7(m_config, versionV7, versionV8);
+#endif
+    const bool migratedFromV8 =
+#if defined(AAT_BACKPACK)
+        AatConfigMigration::migrateAatVrxV8(m_config, versionV8, versionV9,
+            AatConfigDefaults::PAN_DEADBAND_DEFAULT_DEGREES);
+#else
+        AatConfigMigration::migrateVrxV8(m_config, versionV8, versionV9);
+#endif
+    migrated = migrated || migratedFromV8;
+    const bool migratedFromV9 =
+#if defined(AAT_BACKPACK)
+        AatConfigMigration::migrateAatVrxV9(m_config, versionV9, versionV10,
+            m_config.panServoNeutralUs,
+            AatConfigDefaults::PAN_LEFT_MAX_OFFSET_US,
+            AatConfigDefaults::PAN_RIGHT_MAX_OFFSET_US);
+#else
+        AatConfigMigration::migrateVrxV9(m_config, versionV9, versionCurrent);
+#endif
+    migrated = migrated || migratedFromV9;
+#if defined(AAT_BACKPACK)
+    if (AatConfigMigration::migrateVrxVersion(m_config, versionV10, versionCurrent))
+    {
+        m_config.panCompassMounting = AatPanCompassMounting::Standard;
+        migrated = true;
+    }
+#endif
+    if (migrated)
+    {
+        DBGLN("Migrating VRX config to current version...");
+        m_modified = true;
+        Commit();
+    }
+    else if (m_config.version != versionCurrent)
     {
         // If not, revert to defaults for this version
         DBGLN("EEPROM version mismatch! Resetting to defaults...");
         SetDefaults();
     }
-
-    m_modified = false;
+#if defined(AAT_BACKPACK)
+    if (!AatConfigValidation::isPanPulseEnvelopeValid(m_config.panServoNeutralUs,
+        m_config.panLeftMaxOffsetUs, m_config.panRightMaxOffsetUs))
+    {
+        DBGLN("Invalid continuous-pan pulse envelope; restoring neutral and default offsets");
+        SetAatPanPulseEnvelope(AatConfigDefaults::PAN_SERVO_NEUTRAL_US,
+            AatConfigDefaults::PAN_LEFT_MAX_OFFSET_US,
+            AatConfigDefaults::PAN_RIGHT_MAX_OFFSET_US);
+        Commit();
+    }
+#endif
 }
 
 void
@@ -175,18 +242,18 @@ VrxBackpackConfig::SetDefaults()
     m_config.version = VRX_BACKPACK_CONFIG_VERSION | VRX_BACKPACK_CONFIG_MAGIC;
 
 #if defined(AAT_BACKPACK)
-    m_config.aat.satelliteHomeMin = 5;
-    m_config.aat.project = 0xff;
-    m_config.aat.servoSmooth = 5;
-    m_config.aat.centerDir = 0; // N
-    m_config.aat.azimuthServoFastFlip = 1;
-    m_config.aat.servoEndpoints[0].low = 500; // AZIM
-    m_config.aat.servoEndpoints[0].high = 2500;
-    m_config.aat.servoEndpoints[1].low = 1000; // ELEV
-    m_config.aat.servoEndpoints[1].high = 2000;
-
-    m_config.vbat.scale = 292;
-    m_config.vbat.offset = -2;
+    AatConfigDefaults::apply(m_config.aat, m_config.vbat);
+    m_config.panServoNeutralUs = AatConfigDefaults::PAN_SERVO_NEUTRAL_US;
+    AatConfigMigration::resetAatCompassCalibration(m_config);
+    m_config.panCompassNorthAligned = 0;
+    m_config.panDeadbandDegrees = AatConfigDefaults::PAN_DEADBAND_DEFAULT_DEGREES;
+    m_config.panLeftMaxOffsetUs = AatConfigDefaults::PAN_LEFT_MAX_OFFSET_US;
+    m_config.panRightMaxOffsetUs = AatConfigDefaults::PAN_RIGHT_MAX_OFFSET_US;
+    m_config.panLeftStartPulseUs =
+        m_config.panServoNeutralUs - m_config.panLeftMaxOffsetUs;
+    m_config.panRightStartPulseUs =
+        m_config.panServoNeutralUs + m_config.panRightMaxOffsetUs;
+    m_config.panPulseCalibrationValid = 0;
 #endif
 
     m_modified = true;
@@ -307,14 +374,161 @@ VrxBackpackConfig::SetAatSatelliteHomeMin(uint8_t val)
     CONFIG_MOD_CHECK(m_config.aat.satelliteHomeMin, val);
 }
 
+bool
+VrxBackpackConfig::SetAatPanServoNeutral(uint16_t val)
+{
+    return SetAatPanPulseEnvelope(val,
+        m_config.panLeftMaxOffsetUs, m_config.panRightMaxOffsetUs);
+}
+
+bool
+VrxBackpackConfig::SetAatPanDeadbandDegrees(uint8_t val)
+{
+    if (!AatConfigValidation::isPanDeadbandValid(val))
+        return false;
+    if (m_config.panDeadbandDegrees != val)
+    {
+        m_config.panDeadbandDegrees = val;
+        m_modified = true;
+    }
+    return true;
+}
+
+bool
+VrxBackpackConfig::GetAatPanPulseCalibrationValid() const
+{
+    return m_config.panPulseCalibrationValid == 1
+        && AatConfigValidation::isPanPulseCalibrationValid(
+            m_config.panServoNeutralUs, m_config.panLeftStartPulseUs,
+            m_config.panRightStartPulseUs, m_config.panLeftMaxOffsetUs,
+            m_config.panRightMaxOffsetUs);
+}
+
+bool
+VrxBackpackConfig::SetAatPanPulseCalibration(
+    uint16_t leftStartPulseUs, uint16_t rightStartPulseUs)
+{
+    if (!AatConfigValidation::isPanPulseCalibrationValid(
+        m_config.panServoNeutralUs, leftStartPulseUs, rightStartPulseUs,
+        m_config.panLeftMaxOffsetUs, m_config.panRightMaxOffsetUs))
+        return false;
+
+    if (m_config.panLeftStartPulseUs != leftStartPulseUs
+        || m_config.panRightStartPulseUs != rightStartPulseUs
+        || m_config.panPulseCalibrationValid != 1)
+    {
+        m_config.panLeftStartPulseUs = leftStartPulseUs;
+        m_config.panRightStartPulseUs = rightStartPulseUs;
+        m_config.panPulseCalibrationValid = 1;
+        m_modified = true;
+    }
+    return true;
+}
+
+bool
+VrxBackpackConfig::SetAatPanMaximumOffsets(
+    uint16_t leftMaxOffsetUs, uint16_t rightMaxOffsetUs)
+{
+    return SetAatPanPulseEnvelope(m_config.panServoNeutralUs,
+        leftMaxOffsetUs, rightMaxOffsetUs);
+}
+
+bool
+VrxBackpackConfig::SetAatPanPulseEnvelope(uint16_t neutralUs,
+    uint16_t leftMaxOffsetUs, uint16_t rightMaxOffsetUs)
+{
+    if (!AatConfigValidation::isPanPulseEnvelopeValid(
+        neutralUs, leftMaxOffsetUs, rightMaxOffsetUs))
+        return false;
+
+    if (m_config.panServoNeutralUs != neutralUs
+        || m_config.panLeftMaxOffsetUs != leftMaxOffsetUs
+        || m_config.panRightMaxOffsetUs != rightMaxOffsetUs)
+    {
+        m_config.panServoNeutralUs = neutralUs;
+        m_config.panLeftMaxOffsetUs = leftMaxOffsetUs;
+        m_config.panRightMaxOffsetUs = rightMaxOffsetUs;
+        m_config.panLeftStartPulseUs = m_config.panServoNeutralUs - leftMaxOffsetUs;
+        m_config.panRightStartPulseUs = m_config.panServoNeutralUs + rightMaxOffsetUs;
+        m_config.panPulseCalibrationValid = 0;
+        m_modified = true;
+    }
+    return true;
+}
+
+bool
+VrxBackpackConfig::SetAatPanCompassCalibration(const aat_pan_compass_calibration_t &calibration)
+{
+    if (!AatConfigValidation::isPanCompassCalibrationValid(calibration))
+        return false;
+    if (memcmp(&m_config.panCompassCalibration, &calibration, sizeof(calibration)) != 0)
+    {
+        m_config.panCompassCalibration = calibration;
+        m_config.panCompassNorthAligned = 0;
+        m_modified = true;
+    }
+    return true;
+}
+
+bool
+VrxBackpackConfig::SetAatPanCompassMountingReversed()
+{
+    if (IsAatPanCompassReversed() || m_config.panCompassCalibration.valid != 1)
+        return false;
+    m_config.panCompassNorthAligned = 0;
+    m_config.panCompassCalibration.headingOffsetDegrees = 0;
+    m_config.panPulseCalibrationValid = 0;
+    m_config.panCompassMounting = AatPanCompassMounting::ReversedUnverified;
+    m_modified = true;
+    return true;
+}
+
+bool
+VrxBackpackConfig::VerifyAatPanCompassMounting()
+{
+    if (!IsAatPanCompassMountingPending() || m_config.panCompassCalibration.valid != 1)
+        return false;
+    m_config.panCompassMounting = AatPanCompassMounting::ReversedVerified;
+    m_modified = true;
+    return true;
+}
+
+bool
+VrxBackpackConfig::SetAatPanCompassNorthAligned(bool aligned)
+{
+    if (aligned && (IsAatPanCompassMountingPending() ||
+        !AatConfigValidation::isPanCompassNorthAlignmentValid(m_config.panCompassCalibration.valid == 1)))
+        return false;
+    const uint8_t value = aligned ? 1 : 0;
+    if (m_config.panCompassNorthAligned != value)
+    {
+        m_config.panCompassNorthAligned = value;
+        m_modified = true;
+    }
+    return true;
+}
+
+void
+VrxBackpackConfig::ResetAatPanCompassSetup()
+{
+    AatConfigMigration::resetAatCompassSetup(m_config);
+    if (IsAatPanCompassReversed())
+        m_config.panPulseCalibrationValid = 0;
+    m_config.panCompassMounting = AatPanCompassMounting::Standard;
+    m_modified = true;
+}
+
 /**
  * @brief: Validate that the endpoints have a valid range, i.e. low/high not the same
 */
 bool
 VrxBackpackConfig::GetAatServoEndpointsValid() const
 {
-    return (m_config.aat.servoEndpoints[0].low != m_config.aat.servoEndpoints[0].high)
-        && (m_config.aat.servoEndpoints[1].low != m_config.aat.servoEndpoints[1].high);
+    return AatConfigValidation::areServoEndpointsValid(
+        m_config.aat.servoEndpoints[0].low,
+        m_config.aat.servoEndpoints[0].high,
+        m_config.aat.servoEndpoints[1].low,
+        m_config.aat.servoEndpoints[1].high);
 }
 
 #endif /* defined(AAT_BACKPACK) */

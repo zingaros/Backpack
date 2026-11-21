@@ -1,15 +1,580 @@
 document.addEventListener("DOMContentLoaded", init, false);
 
+let aatServoTestNeutralUs = 1520;
+let latestConfigData = null;
+let refreshAatServoSetupPanel = null;
+
 function _(el) {
     return document.getElementById(el);
 }
 
 function init() {
     initAat();
+    initAatServoTest();
     initMavLink();
 
     // sends XMLHttpRequest, so do it last
     initOptions();
+}
+
+function initAatServoTest() {
+    const panel = _('aat-servo-test');
+    if (!panel)
+        return;
+
+    const slider = _('aat-servo-pulse');
+    const value = _('aat-servo-pulse-value');
+    const status = _('aat-servo-status');
+    const outputStatus = _('aat-servo-output');
+    const driverStatus = _('aat-servo-driver');
+    const rawCompassStatus = _('aat-servo-raw');
+    const hmcStatus = _('aat-servo-hmc');
+    const compassStatus = _('aat-servo-compass');
+    const rateStatus = _('aat-servo-rate');
+    const pulseCalibrationButton = _('aat-servo-pulse-calibrate');
+    const pulseCalibrationStopButton = _('aat-servo-pulse-stop');
+    const pulseCalibrationStatus = _('aat-servo-pulse-calibration');
+    const mountCheckStartButton = _('aat-servo-mount-check-start');
+    const mountCheckValidateButton = _('aat-servo-mount-check-validate');
+    const mountCheckResetButton = _('aat-servo-mount-check-reset');
+    const mountReverseButton = _('aat-servo-mount-reverse');
+    const mountCheckStatus = _('aat-servo-mount-check-status');
+    const referenceStatus = _('aat-servo-reference');
+    const sweepStatus = _('aat-servo-sweep');
+    const sweepHint = _('aat-servo-sweep-hint');
+    const sweepSamples = _('aat-servo-samples');
+    const sweepDownloadButton = _('aat-servo-sweep-download');
+    const sweepExportStatus = _('aat-servo-sweep-export-status');
+    const fitStatus = _('aat-servo-fit');
+    const fitQuality = _('aat-servo-fit-quality');
+    const neutralButton = _('aat-servo-neutral');
+    const sweepStartButton = _('aat-servo-sweep-start');
+    const sweepStopButton = _('aat-servo-sweep-stop');
+    const calibrationSaveButton = _('aat-servo-calibration-save');
+    const northAlignButton = _('aat-servo-north-align');
+    const northAlignStatus = _('aat-servo-north-status');
+    let servoTestSweepActive = false;
+    let servoTestRefreshTimer = null;
+    let setupStatusRequestPending = false;
+    let sweepExportInProgress = false;
+    let sweepExported = false;
+    let latestServoData = null;
+    let mountCheckStartHeading = null;
+    let mountCheckPassed = false;
+    let mountReverseAvailable = false;
+    let mountRequestPending = false;
+    let pulseCalibrationActive = false;
+
+    function isNeutralCompassCheckReady(data) {
+        return data && data.setup_active && data.saved_calibration_valid
+            && data.calibrated_heading_valid && data.compass_config_a_matches_requested
+            && data.compass_status_after_trigger_valid && !data.compass_data_locked_after_trigger
+            && data.pulse_us === data.neutral_us && data.output_pulse_us === data.neutral_us
+            && !data.reference_pressed && !data.reference_raw_pressed
+            && data.sweep_state !== 'armed' && data.sweep_state !== 'sweeping';
+    }
+
+    function renderPulse(pulseUs) {
+        slider.value = pulseUs;
+        value.value = `${pulseUs} us`;
+        status.textContent = pulseUs === aatServoTestNeutralUs ? 'Neutral' : 'Pulse command active';
+    }
+
+    async function sendPulse(pulseUs) {
+        if (servoTestSweepActive) {
+            if (pulseUs === aatServoTestNeutralUs)
+                return sendSweepCommand('stop');
+            return;
+        }
+        try {
+            const response = await fetch('/aatservo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ pulse: pulseUs })
+            });
+            if (!response.ok)
+                throw new Error(await response.text());
+            const data = await response.json();
+            renderPulse(data.pulse_us);
+            outputStatus.textContent = `Servo output: ${data.output_pulse_us} us`;
+            driverStatus.textContent = data.servo_attached
+                ? `Servo driver: attached, ${data.library_pulse_us} us`
+                : 'Servo driver: not attached';
+            rawCompassStatus.textContent = `Raw compass X/Y: ${data.raw_x} / ${data.raw_y}; ${data.compass_sample_count} samples, ${data.compass_sample_age_ms} ms old`;
+            hmcStatus.textContent = `HMC ${data.compass_config_a}/${data.compass_config_b}/${data.compass_mode}; polls ${data.compass_poll_count}; pre RDY/LOCK ${data.compass_data_ready}/${data.compass_data_locked}; post ${data.compass_data_ready_after_read}/${data.compass_data_locked_after_read}`;
+            renderCompass(data);
+        } catch (error) {
+            status.textContent = error.message;
+            await refreshCompass();
+        }
+    }
+
+    function renderCompass(data) {
+        const firstCompassUpdate = latestServoData === null;
+        latestServoData = data;
+        pulseCalibrationActive = data.pulse_calibration_active === true;
+        if (firstCompassUpdate && data.mounting_verification_pending) {
+            mountCheckStatus.textContent = 'Correction saved. Capture a new starting heading and repeat the clockwise turn.';
+        } else if (firstCompassUpdate && data.saved_calibration_valid && data.mounting_reversed) {
+            mountCheckPassed = true;
+            mountCheckStatus.textContent = 'Mounting response: reversed direction verified and saved.';
+        } else if (firstCompassUpdate && data.saved_calibration_valid && data.saved_north_aligned) {
+            mountCheckPassed = true;
+            mountCheckStatus.textContent = 'Mounting response: previously commissioned with saved fit and north alignment';
+        }
+        const sweepArmed = data.sweep_state === 'armed';
+        const sweepActive = sweepArmed || data.sweep_state === 'sweeping';
+        const compassConfigMatches = data.compass_config_a_matches_requested;
+        const triggerStatusValid = data.compass_status_after_trigger_valid;
+        const triggerLockClear = triggerStatusValid && !data.compass_data_locked_after_trigger;
+        servoTestSweepActive = sweepActive;
+        const mountingCheckReady = !mountRequestPending && !pulseCalibrationActive && isNeutralCompassCheckReady(data);
+        mountCheckStartButton.disabled = !mountingCheckReady || mountCheckStartHeading !== null;
+        mountCheckValidateButton.disabled = !mountingCheckReady || mountCheckStartHeading === null;
+        mountReverseButton.hidden = !mountReverseAvailable || data.mounting_reversed;
+        mountReverseButton.disabled = !mountingCheckReady || mountReverseButton.hidden;
+        mountCheckResetButton.disabled = mountRequestPending;
+        slider.min = data.min_us;
+        slider.max = data.max_us;
+        slider.disabled = sweepActive || pulseCalibrationActive || !data.manual_pulse_allowed;
+        neutralButton.disabled = !data.setup_active;
+        renderPulse(data.pulse_us);
+        outputStatus.textContent = `Servo output: ${data.output_pulse_us} us`;
+        driverStatus.textContent = data.servo_attached
+            ? `Servo driver: attached, ${data.library_pulse_us} us`
+            : 'Servo driver: not attached';
+        rawCompassStatus.textContent = `Raw compass X/Y: ${data.raw_x} / ${data.raw_y}; ${data.compass_sample_count} samples, ${data.compass_sample_age_ms} ms old`;
+        hmcStatus.textContent = `HMC ${data.compass_config_a}/${data.compass_config_b}/${data.compass_mode}; polls ${data.compass_poll_count}; pre RDY/LOCK ${data.compass_data_ready}/${data.compass_data_locked}; post ${data.compass_data_ready_after_read}/${data.compass_data_locked_after_read}`;
+        if (sweepArmed)
+            status.textContent = 'Owner calibration armed';
+        else if (data.sweep_state === 'sweeping')
+            status.textContent = `Sweep pulse active: ${data.output_pulse_us} us`;
+        referenceStatus.textContent = data.reference_pressed
+            ? 'GPIO32: pressed'
+            : data.reference_raw_pressed ? 'GPIO32: pressed, debouncing' : 'GPIO32: released';
+        sweepStatus.textContent = `Sweep: ${data.sweep_state}`;
+        sweepSamples.textContent = `Samples: ${data.sweep_samples}`;
+        sweepDownloadButton.disabled = sweepExportInProgress
+            || data.sweep_state !== 'complete' || data.sweep_samples === 0;
+        sweepStartButton.disabled = sweepActive || pulseCalibrationActive || data.reference_pressed || data.reference_raw_pressed
+            || !data.compass_detected
+            || !data.heading_valid || !compassConfigMatches || !triggerLockClear;
+        sweepStopButton.disabled = !sweepActive && !pulseCalibrationActive;
+        calibrationSaveButton.disabled = pulseCalibrationActive || !data.calibration_ready || data.calibration_saved;
+        const actuatorNeutral = data.pulse_us === data.neutral_us
+            && data.output_pulse_us === data.neutral_us;
+        pulseCalibrationButton.disabled = !data.pulse_calibration_supported
+            || pulseCalibrationActive || !data.setup_active
+            || !data.saved_calibration_valid || !data.saved_north_aligned
+            || !data.manual_pulse_allowed || data.pulse_us !== data.neutral_us
+            || data.output_pulse_us !== data.neutral_us;
+        pulseCalibrationButton.textContent = pulseCalibrationActive
+            ? 'Pulse calibration running' : 'Run automatic pulse calibration';
+        const savedPulseSummary = `Pulse calibration: saved left ${data.left_start_pulse_us} us, right ${data.right_start_pulse_us} us`;
+        if (pulseCalibrationActive) {
+            const direction = data.pulse_calibration_state === 1 ? 'left' : 'right';
+            pulseCalibrationStatus.textContent = data.pulse_calibration_settling
+                ? `Pulse calibration: settling at neutral before ${direction} stage`
+                : `Pulse calibration: ${direction} at ${data.pulse_calibration_candidate_us} us, ${data.pulse_calibration_samples}/3 direction windows, net ${(data.pulse_calibration_displacement_mdeg / 1000).toFixed(1)} deg (more than 6 deg required)`;
+        } else if (data.pulse_calibration_state === 3) {
+            pulseCalibrationStatus.textContent = savedPulseSummary;
+        } else if (data.pulse_calibration_state === 4) {
+            const faults = ['none', 'invalid configuration', 'safety gate lost',
+                'no reliable motion within maximum offset', 'load did not settle',
+                'wrong-direction motion', 'stage travel exceeded', 'total timeout',
+                'unexpected or delayed output'];
+            pulseCalibrationStatus.textContent =
+                `Pulse calibration: ${faults[data.pulse_calibration_fault] || 'failed'}; pan returned to neutral`;
+        } else if (!data.pulse_calibration_supported) {
+            pulseCalibrationStatus.textContent = 'Automatic pulse calibration requires CompassPan firmware';
+        } else if (data.pulse_calibration_valid) {
+            pulseCalibrationStatus.textContent = savedPulseSummary;
+        } else {
+            pulseCalibrationStatus.textContent = 'Pulse calibration: not running; no valid saved pulses';
+        }
+        northAlignButton.disabled = sweepActive || pulseCalibrationActive || !data.saved_calibration_valid
+            || !data.calibrated_heading_valid || !compassConfigMatches || !triggerLockClear
+            || data.reference_pressed || data.reference_raw_pressed || !actuatorNeutral
+            || data.mounting_verification_pending || (!data.saved_north_aligned && !mountCheckPassed)
+            || data.saved_north_aligned;
+        northAlignButton.textContent = data.saved_north_aligned
+            ? 'True north saved'
+            : 'Press when device is true north';
+        northAlignStatus.textContent = data.saved_north_aligned
+            ? 'True-north calibration: saved'
+            : 'True-north calibration: required';
+        if (sweepArmed)
+            sweepHint.textContent = 'Hold GPIO32 at the reference mark to start rotation.';
+        else if (data.sweep_state === 'sweeping')
+            sweepHint.textContent = 'Keep GPIO32 held through one full turn. Release at the reference mark to finish, or use Stop to abort.';
+        else if (data.calibration_saved && !data.manual_pulse_allowed)
+            sweepHint.textContent = 'Compass fit saved. Check compass status, then press and release GPIO32 at the mechanical mark to unlock direction checks.';
+        else if (data.calibration_saved)
+            sweepHint.textContent = 'Compass fit saved. Direction checks are unlocked; reboot afterward to begin startup alignment.';
+        else if (data.sweep_state === 'fault')
+            sweepHint.textContent = data.fit_attempted
+                ? `Fit rejected (${data.fit_failure}): ${data.fit_samples} samples, X span ${data.span_x}, Y span ${data.span_y}, ${data.covered_sectors}/12 sectors.`
+                : `Sweep stopped (${data.sweep_fault_reason || 'unknown'}). Neutral has been applied.`;
+        else if (!data.compass_detected || !data.heading_valid)
+            sweepHint.textContent = 'Waiting for a fresh compass sample.';
+        else if (!compassConfigMatches)
+            sweepHint.textContent = 'Compass setup is not ready: configuration does not match this firmware.';
+        else if (!triggerStatusValid)
+            sweepHint.textContent = 'Waiting for a valid post-trigger compass status.';
+        else if (!triggerLockClear)
+            sweepHint.textContent = 'Waiting for compass LOCK to clear.';
+        else if (data.reference_pressed || data.reference_raw_pressed)
+            sweepHint.textContent = 'Release GPIO32 before arming owner calibration.';
+        else if (!data.manual_pulse_allowed)
+            sweepHint.textContent = 'Manual pulse locked: verify the pan is within 90 degrees of the captured reference.';
+        else if (data.sweep_state === 'complete')
+            sweepHint.textContent = data.calibration_ready
+                ? 'Owner fit captured. Review the fit before saving.'
+                : 'Sweep complete, but the fit needs more coverage.';
+        else if (!data.manual_pulse_allowed)
+            sweepHint.textContent = 'Manual pulse locked: verify the pan is within 90 degrees of the captured reference.';
+        else
+            sweepHint.textContent = 'Arm owner calibration, then hold GPIO32 to start rotation.';
+        if (!data.compass_detected) {
+            compassStatus.textContent = 'Compass not detected';
+            rateStatus.textContent = 'Relative turn rate: --';
+            fitStatus.textContent = data.saved_calibration_valid ? 'Compass fit: saved' : 'Compass fit: not calibrated';
+            fitQuality.textContent = 'Fit quality unavailable: compass not detected';
+            return;
+        }
+        compassStatus.textContent = data.heading_valid
+            ? `Raw heading: ${(data.heading_mdeg / 1000).toFixed(1)} deg`
+            : 'Compass sample unavailable';
+        rateStatus.textContent = data.rate_valid
+            ? `Relative turn rate: ${(data.rate_mdeg_s / 1000).toFixed(1)} deg/s`
+            : 'Relative turn rate: waiting for samples';
+        if (data.calibrated_rate_valid)
+            rateStatus.textContent += `; calibrated ${(data.calibrated_rate_mdeg_s / 1000).toFixed(1)} deg/s`;
+        fitStatus.textContent = data.fit_attempted && !data.calibration_ready
+            ? `Fit rejected (${data.fit_failure}): ${data.covered_sectors}/12 sectors, return mismatch ${data.return_closure_error_deg} deg`
+            : data.calibration_ready
+            ? `${data.calibration_saved ? 'Fit saved' : 'Fit ready'}: offsets ${data.offset_x.toFixed(1)}, ${data.offset_y.toFixed(1)}; scales ${data.scale_x.toFixed(2)}, ${data.scale_y.toFixed(2)}`
+            : (data.saved_calibration_valid ? 'Compass fit: saved' : 'Compass fit: not calibrated');
+        const hasFitQualityMetrics = data.fit_attempted && data.fit_samples >= 36
+            && Number.isFinite(data.field_magnitude_min)
+            && Number.isFinite(data.field_magnitude_max) && data.field_magnitude_max > 0;
+        const fieldMagnitudeRatio = Number.isFinite(data.field_magnitude_ratio)
+            ? `${data.field_magnitude_ratio.toFixed(2)}x` : 'undefined';
+        fitQuality.textContent = hasFitQualityMetrics
+            ? `Coverage ${data.covered_sectors}/12; return mismatch ${data.return_closure_error_deg} deg; field magnitude ${data.field_magnitude_min.toFixed(0)}-${data.field_magnitude_max.toFixed(0)} (${fieldMagnitudeRatio})`
+                + (data.field_magnitude_warning ? ' - check for magnetic interference' : '')
+            : data.fit_attempted
+            ? 'Fit quality metrics unavailable: too few samples.'
+            : data.saved_calibration_valid
+            ? 'Saved fit; quality details are available after a new owner calibration.'
+            : 'Fit quality: run an owner calibration';
+    }
+
+    async function refreshCompass() {
+        try {
+            const response = await fetch('/aatservo', { cache: 'no-store' });
+            if (!response.ok)
+                throw new Error('Setup status unavailable');
+            const data = await response.json();
+            if (!data.setup_active) {
+                panel.style.display = 'none';
+                if (servoTestRefreshTimer) {
+                    clearInterval(servoTestRefreshTimer);
+                    servoTestRefreshTimer = null;
+                }
+                return;
+            }
+            panel.style.display = 'block';
+            renderCompass(data);
+        } catch (error) {
+            if (panel.style.display !== 'none')
+                status.textContent = `Setup status unavailable: ${error.message}`;
+        }
+    }
+
+    async function refreshSetupPanel() {
+        if (setupStatusRequestPending)
+            return;
+        setupStatusRequestPending = true;
+        try {
+            const response = await fetch('/aatservo', { cache: 'no-store' });
+            if (!response.ok)
+                throw new Error('Setup endpoint unavailable');
+            const data = await response.json();
+            panel.style.display = data.setup_active ? 'block' : 'none';
+            if (!data.setup_active) {
+                if (servoTestRefreshTimer) {
+                    clearInterval(servoTestRefreshTimer);
+                    servoTestRefreshTimer = null;
+                }
+                return;
+            }
+            aatServoTestNeutralUs = data.neutral_us;
+            slider.min = data.min_us;
+            slider.max = data.max_us;
+            renderPulse(data.pulse_us);
+            renderCompass(data);
+            if (!servoTestRefreshTimer)
+                servoTestRefreshTimer = setInterval(refreshCompass, 200);
+        } catch (error) {
+            panel.style.display = 'none';
+            status.textContent = `Setup status unavailable: ${error.message}`;
+        } finally {
+            setupStatusRequestPending = false;
+        }
+    }
+
+    refreshAatServoSetupPanel = refreshSetupPanel;
+
+    slider.addEventListener('input', () => sendPulse(Number(slider.value)));
+    neutralButton.addEventListener('click', () => sendSweepCommand('stop'));
+    pulseCalibrationStopButton.addEventListener('click', () => sendSweepCommand('stop'));
+    sweepStartButton.addEventListener('click', () => sendSweepCommand('owner'));
+    sweepStopButton.addEventListener('click', () => sendSweepCommand('stop'));
+    sweepDownloadButton.addEventListener('click', downloadSweepCsv);
+    calibrationSaveButton.addEventListener('click', saveCompassCalibration);
+    northAlignButton.addEventListener('click', saveTrueNorthReference);
+    pulseCalibrationButton.addEventListener('click', async () => {
+        if (!window.confirm('Servo power must be connected. Secure the loaded pan and clear at least 90 degrees of travel in both directions. Firmware will apply guarded staged pulses automatically. Continue?'))
+            return;
+        try {
+            const response = await fetch('/aatservo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ calibrate_pulses: 1 })
+            });
+            if (!response.ok)
+                throw new Error(await response.text());
+            renderCompass(await response.json());
+        } catch (error) {
+            pulseCalibrationStatus.textContent = `Pulse calibration: ${error.message}`;
+        }
+    });
+    async function requestMountingCheck(action) {
+        const response = await fetch('/aatservo', {
+            method: 'POST',
+            body: new URLSearchParams({ mount_check: action })
+        });
+        if (!response.ok)
+            throw new Error(await response.text() || `Mounting check failed (${response.status})`);
+        return response.json();
+    }
+
+    mountCheckStartButton.addEventListener('click', async () => {
+        if (!isNeutralCompassCheckReady(latestServoData)) {
+            mountCheckStatus.textContent = 'Mounting response: blocked; require fresh compass, matching config, clear LOCK, and neutral output';
+            return;
+        }
+        mountRequestPending = true;
+        renderCompass(latestServoData);
+        try {
+            const data = latestServoData.pulse_calibration_supported
+                ? await requestMountingCheck('capture') : latestServoData;
+            mountCheckStartHeading = data.mounting_start_deg ?? data.calibrated_heading_deg;
+            mountCheckPassed = false;
+            mountReverseAvailable = false;
+            mountCheckStatus.textContent = `Starting heading ${mountCheckStartHeading} deg. Rotate the marked pan clockwise by 90 degrees, then validate.`;
+        } catch (error) {
+            mountCheckStatus.textContent = `Could not capture mounting response: ${error.message}`;
+        } finally {
+            mountRequestPending = false;
+            renderCompass(latestServoData);
+        }
+    });
+    mountCheckValidateButton.addEventListener('click', async () => {
+        if (mountCheckStartHeading === null) {
+            mountCheckStatus.textContent = 'Mounting response: capture a starting heading first';
+            return;
+        }
+        mountRequestPending = true;
+        mountReverseAvailable = false;
+        renderCompass(latestServoData);
+        try {
+            const response = await fetch('/aatservo', { cache: 'no-store' });
+            if (!response.ok)
+                throw new Error('Fresh setup status unavailable');
+            const data = await response.json();
+            renderCompass(data);
+            if (!isNeutralCompassCheckReady(data)) {
+                mountCheckPassed = false;
+                mountCheckStatus.textContent = 'Mounting response: blocked; require fresh compass, matching config, clear LOCK, released GPIO32, and neutral output';
+                return;
+            }
+            let headingChange = data.calibrated_heading_deg - mountCheckStartHeading;
+            if (headingChange > 180)
+                headingChange -= 360;
+            else if (headingChange < -180)
+                headingChange += 360;
+            if (headingChange >= 70 && headingChange <= 110) {
+                if (data.mounting_verification_pending)
+                    renderCompass(await requestMountingCheck('verify'));
+                mountCheckPassed = true;
+                mountCheckStartHeading = null;
+                mountCheckStatus.textContent = `Mounting response: PASS, heading increased ${headingChange} deg`;
+            } else {
+                mountCheckPassed = false;
+                mountReverseAvailable = data.pulse_calibration_supported && !data.mounting_reversed
+                    && headingChange >= -110 && headingChange <= -70;
+                mountCheckStatus.textContent = mountReverseAvailable
+                    ? `Heading decreased ${-headingChange} deg. Apply the reversed compass direction, then repeat the hand check.`
+                    : `Mounting response: FAIL, heading changed ${headingChange} deg; expected +70 to +110 deg`;
+            }
+        } catch (error) {
+            mountCheckPassed = false;
+            mountCheckStatus.textContent = `Mounting response: could not read fresh compass status (${error.message})`;
+        } finally {
+            mountRequestPending = false;
+            renderCompass(latestServoData);
+        }
+    });
+    mountReverseButton.addEventListener('click', async () => {
+        if (mountReverseButton.disabled)
+            return;
+        mountRequestPending = true;
+        renderCompass(latestServoData);
+        try {
+            const data = await requestMountingCheck('reverse');
+            mountCheckStartHeading = null;
+            mountCheckPassed = false;
+            mountReverseAvailable = false;
+            renderCompass(data);
+            mountCheckStatus.textContent = 'Correction saved. Capture a new starting heading and repeat the clockwise turn before aligning true north.';
+        } catch (error) {
+            mountCheckStatus.textContent = `Could not apply mounting correction: ${error.message}`;
+        } finally {
+            mountRequestPending = false;
+            renderCompass(latestServoData);
+        }
+    });
+    mountCheckResetButton.addEventListener('click', () => {
+        mountCheckStartHeading = null;
+        mountCheckPassed = false;
+        mountReverseAvailable = false;
+        mountCheckStatus.textContent = 'Mounting response: required';
+        if (latestServoData)
+            renderCompass(latestServoData);
+    });
+
+    async function sendSweepCommand(action) {
+        if (action === 'owner' && latestServoData && latestServoData.sweep_state === 'complete'
+            && latestServoData.sweep_samples > 0 && !sweepExported
+            && !confirm('Starting another sweep replaces the current raw data. Start anyway?'))
+            return;
+        try {
+            const response = await fetch('/aatservo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ sweep: action })
+            });
+            if (!response.ok)
+                throw new Error(await response.text());
+            if (action === 'owner')
+                sweepExported = false;
+            renderCompass(await response.json());
+        } catch (error) {
+            sweepStatus.textContent = `Sweep: ${error.message}`;
+            if (action === 'stop')
+                pulseCalibrationStatus.textContent =
+                    `Stop not confirmed: ${error.message}. Disconnect servo power if motion continues.`;
+        }
+    }
+
+    async function saveCompassCalibration() {
+        try {
+            const response = await fetch('/aatservo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ save_calibration: 1 })
+            });
+            if (!response.ok)
+                throw new Error(await response.text());
+            mountCheckStartHeading = null;
+            mountCheckPassed = false;
+            mountCheckStatus.textContent = 'Mounting response: required after saving a new fit';
+            renderCompass(await response.json());
+            fitStatus.textContent = 'Compass fit: saved';
+        } catch (error) {
+            fitStatus.textContent = `Compass fit: ${error.message}`;
+        }
+    }
+
+    async function downloadSweepCsv() {
+        const totalSamples = latestServoData && latestServoData.sweep_samples;
+        if (!latestServoData || latestServoData.sweep_state !== 'complete'
+            || !totalSamples || sweepExportInProgress)
+            return;
+
+        sweepExportInProgress = true;
+        sweepDownloadButton.disabled = true;
+        let nextStart = 0;
+        const rows = [];
+        try {
+            while (nextStart < totalSamples) {
+                const count = Math.min(32, totalSamples - nextStart);
+                const query = new URLSearchParams({ start: nextStart, count });
+                const response = await fetch(`/aatsweep?${query}`, { cache: 'no-store' });
+                if (!response.ok)
+                    throw new Error(await response.text());
+                const chunk = await response.json();
+                if (chunk.schema !== 'aat-sweep-v1' || chunk.sample_count !== totalSamples
+                    || chunk.start_index !== nextStart || !Array.isArray(chunk.samples)
+                    || chunk.samples.length === 0 || chunk.next_index <= nextStart)
+                    throw new Error('Sweep export returned an incomplete or inconsistent chunk');
+
+                rows.push(...chunk.samples);
+                nextStart = chunk.next_index;
+                sweepExportStatus.textContent = `Downloading raw sweep: ${nextStart}/${totalSamples} samples`;
+            }
+
+            const csv = ['sample_index,elapsed_ms,raw_x,raw_y,raw_z',
+                ...rows.map(sample => sample.join(','))].join('\r\n');
+            const blobUrl = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+            const downloadLink = document.createElement('a');
+            downloadLink.href = blobUrl;
+            downloadLink.download = `aat-compass-sweep-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+            downloadLink.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+            sweepExported = true;
+            sweepExportStatus.textContent = `Downloaded ${rows.length} raw XYZ sweep samples.`;
+        } catch (error) {
+            sweepExportStatus.textContent = `Sweep export failed: ${error.message}`;
+        } finally {
+            sweepExportInProgress = false;
+            if (latestServoData)
+                renderCompass(latestServoData);
+        }
+    }
+
+    async function saveTrueNorthReference() {
+        try {
+            const response = await fetch('/aatservo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ north_bearing_deg: 0 })
+            });
+            if (!response.ok)
+                throw new Error(await response.text());
+            renderCompass(await response.json());
+        } catch (error) {
+            northAlignStatus.textContent = `True-north alignment: ${error.message}`;
+        }
+    }
+
+    const neutralInput = _('pan_neutral_us');
+    neutralInput.addEventListener('change', () => {
+        const neutralUs = Number(neutralInput.value);
+        if (neutralUs < 1450 || neutralUs > 1550)
+            return;
+        aatServoTestNeutralUs = neutralUs;
+        if (panel.style.display !== 'none') {
+            renderPulse(neutralUs);
+            sendPulse(neutralUs);
+        }
+    });
+
+    refreshSetupPanel();
 }
 
 function initAat() {
@@ -18,12 +583,49 @@ function initAat() {
         return;
 
     aatsubmit.addEventListener('click', callback('Update AAT Parameters', 'An error occurred changing values', '/aatconfig',
-        () => { return new URLSearchParams(new FormData(_('aatconfig'))); }
+        () => {
+            const params = new URLSearchParams(new FormData(_('aatconfig')));
+            if (Number(_('servomode').value) === 3) {
+                params.delete('bear');
+                params.delete('elev');
+            }
+            return params;
+        }
     ));
     _('azim_center').addEventListener('change', aatAzimCenterChanged);
+    for (const id of ['pan_neutral_us', 'pan_left_max_offset_us', 'pan_right_max_offset_us'])
+        _(id).addEventListener('input', updatePanPulseLimits);
     document.querySelectorAll('.aatlive').forEach(
         el => el.addEventListener('change', aatLineElementChanged)
     );
+
+    const servoMode = _('servomode');
+    servoMode.addEventListener('change', () => {
+        updateServoModeOptions();
+        updateContinuousPanSetup(latestConfigData);
+        if (Number(servoMode.value) === 3)
+            refreshPanRuntime();
+    });
+    _('continuous-pan-enter-setup').addEventListener('click', async () => {
+        if (!window.confirm('Tracking will stop and the pan will enter calibration setup. Continue?'))
+            return;
+        try {
+            const response = await fetch('/aatservo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ enter_setup: 1 })
+            });
+            if (!response.ok)
+                throw new Error(await response.text());
+            await refreshPanRuntime();
+        } catch (error) {
+            _('continuous-pan-summary').textContent = `Cannot enter setup: ${error.message}`;
+        }
+    });
+    window.setInterval(() => {
+        if (Number(servoMode.value) === 3)
+            refreshPanRuntime();
+    }, 1000);
 }
 
 function initMavLink() {
@@ -118,6 +720,7 @@ function resetMavLinkDefaults() {
 }
 
 function updateConfig(data) {
+    latestConfigData = data;
     let config = data.config;
     if (config.mode==="STA") {
         _('stamode').style.display = 'block';
@@ -143,6 +746,7 @@ function updateConfig(data) {
     if(config['product_name'] && _('product_name')) _('product_name').textContent = config['product_name'];
 
     updateAatConfig(config);
+    updateContinuousPanSetup(data);
 }
 
 function updateAatConfig(config)
@@ -154,9 +758,16 @@ function updateAatConfig(config)
     // AAT
     _('servosmoo').value = config.aat.servosmoo;
     _('servomode').value = config.aat.servomode;
+    updateServoModeOptions();
     _('azim_center').value = config.aat.azim_center;
     _('azim_min').value = config.aat.azim_min;
     _('azim_max').value = config.aat.azim_max;
+    _('pan_neutral_us').value = config.aat.pan_neutral_us;
+    _('pan_deadband_degrees').value = config.aat.pan_deadband_degrees;
+    _('pan_left_max_offset_us').value = config.aat.pan_left_max_offset_us;
+    _('pan_right_max_offset_us').value = config.aat.pan_right_max_offset_us;
+    updatePanPulseLimits();
+    aatServoTestNeutralUs = config.aat.pan_neutral_us;
     _('azim_sff').checked = config.aat.azim_sff === 1;
     _('elev_min').value = config.aat.elev_min;
     _('elev_max').value = config.aat.elev_max;
@@ -166,6 +777,185 @@ function updateAatConfig(config)
     // VBAT
     _('vbat_offset').value = config.vbat.offset;
     _('vbat_scale').value = config.vbat.scale;
+}
+
+function updatePanPulseLimits()
+{
+    const neutralInput = _('pan_neutral_us');
+    const leftInput = _('pan_left_max_offset_us');
+    const rightInput = _('pan_right_max_offset_us');
+    const preview = _('pan_pulse_limits');
+    const neutral = neutralInput.valueAsNumber;
+    if (!Number.isInteger(neutral) || !neutralInput.validity.valid) {
+        leftInput.max = rightInput.max = 550;
+        preview.textContent = 'Enter a neutral pulse from 1450 to 1550 us to calculate the limits.';
+        return;
+    }
+
+    leftInput.max = neutral - 1000;
+    rightInput.max = 2000 - neutral;
+    if (!Number.isInteger(leftInput.valueAsNumber) || !leftInput.validity.valid
+        || !Number.isInteger(rightInput.valueAsNumber) || !rightInput.validity.valid) {
+        preview.textContent = `Enter a left offset of 5-${leftInput.max} us and a right offset of 5-${rightInput.max} us.`;
+        return;
+    }
+    preview.textContent = `Pulse limits: left ${neutral - leftInput.valueAsNumber} us, right ${neutral + rightInput.valueAsNumber} us.`;
+}
+
+function updateServoModeOptions()
+{
+    const positionalMode = Number(_('servomode').value) !== 3;
+    _('positional-azimuth-options').style.display = positionalMode ? '' : 'none';
+    _('positional-elevation-test').style.display = positionalMode ? '' : 'none';
+    _('positional-servo-speed').style.display = positionalMode ? '' : 'none';
+    _('continuous-servo-speed').style.display = positionalMode ? 'none' : '';
+}
+
+function updateContinuousPanSetup(data)
+{
+    const panel = _('continuous-pan-setup');
+    const panelContainer = _('continuous-pan-panel');
+    const selected = Number(_('servomode').value) === 3;
+    if (!panel)
+        return;
+
+    panelContainer.style.display = selected ? '' : 'none';
+    panel.style.display = selected ? 'block' : 'none';
+    if (!selected)
+        return;
+
+    const summary = _('continuous-pan-summary');
+    const setupButton = _('continuous-pan-enter-setup');
+    const fitStatus = _('continuous-pan-fit');
+    const northStatus = _('continuous-pan-north');
+    const compassStatus = _('continuous-pan-compass');
+    const gpsStatus = _('continuous-pan-gps');
+    const referenceStatus = _('continuous-pan-reference');
+    const outputStatus = _('continuous-pan-output');
+    const savedConfig = data && data.config && data.config.aat;
+    const runtime = data && data.pan_runtime;
+
+    if (!data || !savedConfig) {
+        summary.textContent = 'Waiting for AAT configuration.';
+        return;
+    }
+
+    fitStatus.textContent = savedConfig.pan_compass_valid ? 'Compass fit: saved' : 'Compass fit: required';
+    northStatus.textContent = savedConfig.pan_north_aligned
+        ? 'True-north calibration: saved'
+        : 'True-north calibration: required';
+
+    if (!runtime) {
+        setupButton.style.display = 'none';
+        summary.textContent = 'Continuous pan is unavailable in this firmware. Use the CompassPan firmware to run mode 3.';
+        compassStatus.textContent = 'Compass runtime: unavailable';
+        gpsStatus.textContent = 'GPS runtime: unavailable';
+        referenceStatus.textContent = 'Reference: unavailable';
+        outputStatus.textContent = 'Output: unavailable';
+        return;
+    }
+
+    setupButton.style.display = Number(savedConfig.servomode) === 3
+        && runtime.mode_active && !runtime.setup_active ? 'inline-block' : 'none';
+
+    if (runtime.setup_active) {
+        if (refreshAatServoSetupPanel)
+            refreshAatServoSetupPanel();
+        summary.textContent = !savedConfig.pan_compass_valid
+            ? 'Setup is active. Start with the compass fit.'
+            : !savedConfig.pan_north_aligned
+                ? 'Compass fit saved. Check the mounting response, then save true north.'
+                : !savedConfig.pan_pulse_calibration_valid
+                    ? 'Compass and true north saved. Confirm mechanical home before running pulse calibration.'
+                    : 'Pulse calibration saved. Tracking remains inhibited while setup is active.';
+        compassStatus.textContent = runtime.compass_detected
+            ? (savedConfig.pan_compass_valid ? 'Compass: detected; fit saved' : 'Compass: detected; fit setup pending')
+            : 'Compass: searching';
+        gpsStatus.textContent = 'Aircraft GPS: checked when tracking starts';
+        referenceStatus.textContent = 'Setup: tracking inhibited';
+        outputStatus.textContent = 'Tracking output inhibited; use guarded setup controls below.';
+        return;
+    }
+
+    if (!runtime.mode_active) {
+        compassStatus.textContent = 'Compass runtime: checked after mode 3 starts';
+        gpsStatus.textContent = 'Aircraft GPS: checked after mode 3 starts';
+        referenceStatus.textContent = 'CompassPan reference: inactive';
+        outputStatus.textContent = 'CompassPan output: inactive';
+        summary.textContent = Number(savedConfig.servomode) === 3
+            ? 'Mode 3 is saved but inactive. Reboot the tracker to start continuous pan.'
+            : 'Mode 3 is selected here but not saved. Save settings, then reboot to apply it.';
+        return;
+    }
+
+    const compassSampleValid = runtime.compass_sample_valid !== undefined
+        ? runtime.compass_sample_valid : runtime.compass_fresh;
+    const compassReady = runtime.compass_detected
+        && compassSampleValid
+        && runtime.compass_config_matches_requested
+        && runtime.trigger_status_valid
+        && runtime.trigger_lock_clear;
+    compassStatus.textContent = !runtime.compass_detected ? 'Compass: not detected'
+        : !runtime.compass_config_matches_requested ? 'Compass: configuration mismatch'
+        : !runtime.trigger_status_valid ? 'Compass: trigger status unavailable'
+        : !runtime.trigger_lock_clear ? 'Compass: waiting for LOCK to clear'
+        : !compassSampleValid ? 'Compass: waiting for a fresh valid sample'
+        : 'Compass: ready';
+    gpsStatus.textContent = runtime.gps_fresh ? 'Aircraft GPS: fresh' : 'Aircraft GPS: stale or unavailable';
+    referenceStatus.textContent = ['Waiting for button release', 'Not referenced', 'Referenced', 'Safety fault'][runtime.safety_state]
+        || 'Reference: unknown';
+    outputStatus.textContent = `Pan ${runtime.current_pan_deg} deg; target ${runtime.target_pan_deg} deg; error ${runtime.error_deg} deg; pulse ${runtime.applied_pulse_us} us`;
+
+    if (Number(savedConfig.servomode) !== 3)
+        summary.textContent = 'Mode 3 is selected here but not saved. Save settings, then reboot to apply it.';
+    else if (!runtime.mode_active)
+        summary.textContent = 'Mode 3 is saved but inactive. Reboot the tracker to start continuous pan.';
+    else if (runtime.block_reason && runtime.block_reason !== 'none') {
+        const blockMessages = {
+            'setup-active': 'Tracking inhibited: setup mode is active.',
+            'startup-alignment-required': 'Tracking inhibited: confirm the mechanical home at startup.',
+            'compass-invalid': 'Tracking inhibited: compass feedback is stale or invalid.',
+            'reference-required': 'Tracking inhibited: pan is not referenced.',
+            'gps-stale': 'Tracking inhibited: aircraft GPS is stale or unavailable.',
+            'safety-fault': 'Tracking inhibited: a pan safety fault requires a new reference.'
+        };
+        summary.textContent = blockMessages[runtime.block_reason]
+            || `Tracking inhibited: ${runtime.block_reason}.`;
+    }
+    else if (!compassSampleValid)
+        summary.textContent = 'Tracking inhibited: compass sample, configuration, or trigger status is not valid.';
+    else if (!runtime.startup_alignment_complete)
+        summary.textContent = savedConfig.pan_north_aligned
+            ? 'Starting: place the pan at its marked mechanical home and press GPIO32.'
+            : 'Starting: point the pan true north and press GPIO32 to save north and set home.';
+    else if (!savedConfig.pan_compass_valid)
+        summary.textContent = 'Tracking inhibited: save a valid compass axis fit first.';
+    else if (!runtime.north_aligned)
+        summary.textContent = 'Tracking inhibited: true-north calibration is required.';
+    else if (runtime.safety_state !== 2)
+        summary.textContent = 'Tracking inhibited: pan is not referenced or a safety fault is active.';
+    else if (!compassReady)
+        summary.textContent = 'Tracking inhibited: compass checks are not ready.';
+    else if (!runtime.gps_fresh)
+        summary.textContent = 'Tracking inhibited: waiting for fresh aircraft GPS.';
+    else
+        summary.textContent = 'Continuous pan is tracking with valid compass, reference, and aircraft GPS.';
+}
+
+async function refreshPanRuntime()
+{
+    try {
+        const response = await fetch('/config', { cache: 'no-store' });
+        if (!response.ok)
+            throw new Error('Configuration unavailable');
+        const data = await response.json();
+        latestConfigData = data;
+        updateContinuousPanSetup(data);
+    } catch (_error) {
+        const summary = _('continuous-pan-summary');
+        if (summary)
+            summary.textContent = 'Cannot read continuous-pan status.';
+    }
 }
 
 function get_networks() {

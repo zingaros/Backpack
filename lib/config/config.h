@@ -8,7 +8,17 @@
 #define TIMER_BACKPACK_CONFIG_MAGIC (0b11U << 30)
 
 #define TX_BACKPACK_CONFIG_VERSION      4
-#define VRX_BACKPACK_CONFIG_VERSION     5
+#define VRX_BACKPACK_CONFIG_VERSION_V10 10
+#if defined(AAT_BACKPACK)
+#define VRX_BACKPACK_CONFIG_VERSION     11
+#else
+#define VRX_BACKPACK_CONFIG_VERSION     VRX_BACKPACK_CONFIG_VERSION_V10
+#endif
+#define VRX_BACKPACK_CONFIG_VERSION_V9  9
+#define VRX_BACKPACK_CONFIG_VERSION_V8  8
+#define VRX_BACKPACK_CONFIG_VERSION_V7  7
+#define VRX_BACKPACK_CONFIG_VERSION_V6  6
+#define VRX_BACKPACK_CONFIG_VERSION_V5  5
 #define TIMER_BACKPACK_CONFIG_VERSION   3
 
 
@@ -80,6 +90,21 @@ extern TxBackpackConfig config;
 ///////////////////////////////////////////////////
 
 #if defined(TARGET_VRX_BACKPACK)
+typedef struct __attribute__((packed)) {
+    int16_t offsetX;
+    int16_t offsetY;
+    uint16_t scaleXPermille;
+    uint16_t scaleYPermille;
+    int16_t headingOffsetDegrees;
+    uint8_t valid;
+} aat_pan_compass_calibration_t;
+
+enum class AatPanCompassMounting : uint8_t {
+    Standard,
+    ReversedUnverified,
+    ReversedVerified
+};
+
 typedef struct {
     uint32_t    version;
     uint8_t     bootCount;
@@ -112,6 +137,16 @@ typedef struct {
         uint16_t scale;
         int16_t offset;
     } vbat;
+    uint16_t panServoNeutralUs;
+    aat_pan_compass_calibration_t panCompassCalibration;
+    uint8_t panCompassNorthAligned;
+    uint8_t panDeadbandDegrees;
+    uint16_t panLeftStartPulseUs;
+    uint16_t panRightStartPulseUs;
+    uint8_t panPulseCalibrationValid;
+    uint16_t panLeftMaxOffsetUs;
+    uint16_t panRightMaxOffsetUs;
+    AatPanCompassMounting panCompassMounting;
 #endif
 } vrx_backpack_config_t;
 
@@ -165,6 +200,35 @@ public:
     uint16_t GetAatServoHigh(uint8_t idx) const { return m_config.aat.servoEndpoints[idx].high; }
     void SetAatServoHigh(uint8_t idx, uint16_t val);
     bool GetAatServoEndpointsValid() const;
+    uint16_t GetAatPanServoNeutral() const { return m_config.panServoNeutralUs; }
+    bool SetAatPanServoNeutral(uint16_t val);
+    uint8_t GetAatPanDeadbandDegrees() const { return m_config.panDeadbandDegrees; }
+    bool SetAatPanDeadbandDegrees(uint8_t val);
+    bool GetAatPanPulseCalibrationValid() const;
+    uint16_t GetAatPanLeftStartPulse() const { return m_config.panLeftStartPulseUs; }
+    uint16_t GetAatPanRightStartPulse() const { return m_config.panRightStartPulseUs; }
+    bool SetAatPanPulseCalibration(uint16_t leftStartPulseUs, uint16_t rightStartPulseUs);
+    uint16_t GetAatPanLeftMaxOffset() const { return m_config.panLeftMaxOffsetUs; }
+    uint16_t GetAatPanRightMaxOffset() const { return m_config.panRightMaxOffsetUs; }
+    uint16_t GetAatPanLeftMaxPulse() const {
+        return m_config.panServoNeutralUs - m_config.panLeftMaxOffsetUs;
+    }
+    uint16_t GetAatPanRightMaxPulse() const {
+        return m_config.panServoNeutralUs + m_config.panRightMaxOffsetUs;
+    }
+    bool SetAatPanMaximumOffsets(uint16_t leftMaxOffsetUs, uint16_t rightMaxOffsetUs);
+    bool SetAatPanPulseEnvelope(uint16_t neutralUs,
+        uint16_t leftMaxOffsetUs, uint16_t rightMaxOffsetUs);
+    aat_pan_compass_calibration_t GetAatPanCompassCalibration() const { return m_config.panCompassCalibration; }
+    bool SetAatPanCompassCalibration(const aat_pan_compass_calibration_t &calibration);
+    AatPanCompassMounting GetAatPanCompassMounting() const { return m_config.panCompassMounting; }
+    bool IsAatPanCompassReversed() const { return m_config.panCompassMounting != AatPanCompassMounting::Standard; }
+    bool IsAatPanCompassMountingPending() const { return m_config.panCompassMounting == AatPanCompassMounting::ReversedUnverified; }
+    bool SetAatPanCompassMountingReversed();
+    bool VerifyAatPanCompassMounting();
+    void ResetAatPanCompassSetup();
+    bool GetAatPanCompassNorthAligned() const { return m_config.panCompassNorthAligned == 1 && !IsAatPanCompassMountingPending(); }
+    bool SetAatPanCompassNorthAligned(bool aligned);
 
     uint16_t GetVbatScale() const { return m_config.vbat.scale; }
     void SetVbatScale(uint16_t val);

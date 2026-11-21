@@ -51,6 +51,8 @@
 #define NO_BINDING_TIMEOUT  120000
 #define BINDING_LED_PAUSE   1000
 
+static constexpr uint8_t AAT_PERF_BOUND_MARKER = 0xA7;
+
 #if !defined(VRX_BOOT_DELAY)
   #define VRX_BOOT_DELAY  0
 #endif
@@ -151,6 +153,9 @@ void OnDataRecv(uint8_t * mac_addr, uint8_t *data, uint8_t data_len)
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *data, int data_len)
 #endif
 {
+#if defined(AAT_PERF_DEBUG)
+  vrxModule.recordEspNowDatagram();
+#endif
   MSP recv_msp;
   DBGVLN("ESP NOW DATA:");
   for(int i = 0; i < data_len; i++)
@@ -160,6 +165,9 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *data, int data_len)
     if (recv_msp.processReceivedByte(data[i]))
     {
       DBGVLN(""); // Extra line for serial output readability
+    #if defined(AAT_PERF_DEBUG)
+      vrxModule.recordEspNowMspPacket();
+    #endif
       // Finished processing a complete packet
       // Only process packets from a bound MAC address
       if (connectionState == binding ||
@@ -175,13 +183,24 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *data, int data_len)
       {
         gotInitialPacket = true;
         #if defined(PLATFORM_ESP8266)
+          #if defined(AAT_PERF_DEBUG)
+          vrxModule.recordEspNowDecision(true, true);
+          #endif
           ProcessMSPPacket(recv_msp.getReceivedPacket());
         #elif defined(PLATFORM_ESP32)
+          #if defined(AAT_PERF_DEBUG)
+          const bool queued = xQueueSend(rxqueue, recv_msp.getReceivedPacket(), (TickType_t)1024) == pdTRUE;
+          vrxModule.recordEspNowDecision(true, queued);
+          #else
           xQueueSend(rxqueue, recv_msp.getReceivedPacket(), (TickType_t)1024);
+          #endif
         #endif
       }
       else
       {
+#if defined(AAT_PERF_DEBUG)
+        vrxModule.recordEspNowDecision(false, false);
+#endif
         DBGLN("Failed MAC add check and not in bindingMode.");
       }
       recv_msp.markPacketReceived();
@@ -205,7 +224,12 @@ void ProcessMSPPacket(mspPacket_t *packet)
         DBG(",");
       }
       DBG(""); // Extra line for serial output readability
+    #if defined(AAT_PERF_DEBUG)
+      config.SetBootCount(AAT_PERF_BOUND_MARKER);
+      config.Commit();
+    #else
       resetBootCounter();
+    #endif
       connectionState = running;
       rebootTime = millis() + 200; // Add 200ms to allow for any response message(s) to be sent back to device
     }
@@ -255,6 +279,9 @@ void ProcessMSPPacket(mspPacket_t *packet)
     #endif
     break;
   case MSP_ELRS_BACKPACK_CRSF_TLM:
+#if defined(AAT_PERF_DEBUG)
+    vrxModule.recordCrsfTelemetryPacket();
+#endif
     DBGV("Processing MSP_ELRS_BACKPACK_CRSF_TLM type %x\n", packet->payload[1]);
     if (packet->payloadSize < 4) {
       DBGLN("CRSF_TLM packet too short")
@@ -291,13 +318,21 @@ void SetupEspNow()
       esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
       esp_now_add_peer(firmwareOptions.uid, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
     #elif defined(PLATFORM_ESP32)
-      memcpy(peerInfo.peer_addr, firmwareOptions.uid, 6);
-      peerInfo.channel = 0;
-      peerInfo.encrypt = false;
-      if (esp_now_add_peer(&peerInfo) != ESP_OK)
+      #if defined(AAT_PERF_DEBUG)
+      const bool awaitingDiagnosticBind = connectionState == binding && !firmwareOptions.hasUID;
+      #else
+      const bool awaitingDiagnosticBind = false;
+      #endif
+      if (!awaitingDiagnosticBind)
       {
-        DBGLN("ESP-NOW failed to add peer");
-        return;
+        memcpy(peerInfo.peer_addr, firmwareOptions.uid, 6);
+        peerInfo.channel = 0;
+        peerInfo.encrypt = false;
+        if (esp_now_add_peer(&peerInfo) != ESP_OK)
+        {
+          DBGLN("ESP-NOW failed to add peer");
+          return;
+        }
       }
     #endif
 
@@ -450,11 +485,35 @@ void setup()
 
   devicesInit(ui_devices, ARRAY_SIZE(ui_devices));
 
+#if defined(AAT_PERF_DEBUG)
+  if (config.GetStartWiFiOnBoot())
+  {
+    config.SetStartWiFiOnBoot(false);
+    config.Commit();
+  }
+#else
   #ifdef DEBUG_ELRS_WIFI
     config.SetStartWiFiOnBoot(true);
   #endif
+#endif
 
-  if (config.GetStartWiFiOnBoot())
+#if defined(AAT_COMPASS_TRACKING)
+  bool startWiFiOnly = config.GetStartWiFiOnBoot();
+#elif defined(AAT_SERVO_TEST) || defined(AAT_COMPASS_DEBUG)
+  bool startWiFiOnly = true;
+#else
+  bool startWiFiOnly = config.GetStartWiFiOnBoot();
+#endif
+#if defined(AAT_PERF_DEBUG)
+  if (startWiFiOnly)
+  {
+    config.SetStartWiFiOnBoot(false);
+    config.Commit();
+    startWiFiOnly = false;
+  }
+#endif
+
+  if (startWiFiOnly)
   {
     config.SetStartWiFiOnBoot(false);
     config.Commit();
@@ -464,7 +523,27 @@ void setup()
   else
   {
 #if !defined(NO_AUTOBIND)
+#if defined(AAT_PERF_DEBUG)
+    if (!firmwareOptions.hasUID)
+    {
+      if (config.GetBootCount() == AAT_PERF_BOUND_MARKER)
+        connectionState = running;
+      else
+      {
+        connectionState = binding;
+        bindingStart = millis();
+      }
+    }
+    else
+      checkIfInBindingMode();
+#else
+    if (config.GetBootCount() == AAT_PERF_BOUND_MARKER)
+    {
+      config.SetBootCount(0);
+      config.Commit();
+    }
     checkIfInBindingMode();
+#endif
 #endif
     SetSoftMACAddress();
     SetupEspNow();
@@ -472,9 +551,7 @@ void setup()
 
   devicesStart();
   if (connectionState == starting)
-  {
     connectionState = running;
-  }
 
   vrxModule.Init();
   #if defined(HDZERO_BACKPACK)
@@ -504,6 +581,7 @@ void loop()
       }
   #endif
 
+#if !defined(AAT_PERF_DEBUG)
   if (BindingExpired(now))
   {
     DBGLN("Binding expired");
@@ -513,6 +591,7 @@ void loop()
     connectionState = running;
 #endif
   }
+#endif
 
   if (sendChannelChangesToVrx)
   {
@@ -527,7 +606,12 @@ void loop()
 
 #if !defined(NO_AUTOBIND)
   // Power cycle must be done within 30s.  Long timeout to allow goggles to boot and shutdown correctly e.g. Orqa.
+#if defined(AAT_PERF_DEBUG)
+  if (now > BINDING_TIMEOUT && config.GetBootCount() > 0
+      && config.GetBootCount() != AAT_PERF_BOUND_MARKER)
+#else
   if (now > BINDING_TIMEOUT && config.GetBootCount() > 0)
+#endif
   {
     DBGLN("resetBootCounter...");
     resetBootCounter();

@@ -9,6 +9,23 @@ jobs:
     - name: Validate targets.json
       run: python3 .github/targets_validator.py
 
+  aat-tests:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.10'
+    - name: Install PlatformIO
+      run: pip install platformio
+    - name: Run native AAT regression tests
+      run: |
+        platformio platform install native
+        pio test -e native-aat-test
+
   targets:
     needs: validate
     runs-on: ubuntu-latest

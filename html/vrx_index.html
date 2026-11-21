@@ -148,38 +148,44 @@
 				<div class="mui-tabs__pane" id="pane-justified-4">
 					<form action="/aatconfig" id="aatconfig" method="POST" class="mui-form">
 						<div class="mui-panel">
-							<fieldset><legend>Servo maximum speed</legend>
-								Use the slider to set a limit on the servo's maximum rotational speed. Note that when the azimuth servo
-								needs to flip from one side to the other, it may move at full speed if the 'Fast Flip' option is enabled.
-								<input type="range" id="servosmoo" name="servosmoo" list="servosmoo_markers" value="5" min="0" max="9" step="1" style="width: 100%;"/>
-								<datalist id="servosmoo_markers">
-									<option value="0" label="Fast" title="Lickedy Speed"></option>
-									<option value="1" label=""></option>
-									<option value="2" label=""></option>
-									<option value="3" label=""></option>
-									<option value="4" label=""></option>
-									<option value="5" label="90deg/s"></option>
-									<option value="6" label=""></option>
-									<option value="7" label=""></option>
-									<option value="8" label=""></option>
-									<option value="9" label="Slow"></option>
-								</datalist>
-							</fieldset>
-						</div>
-						<div class="mui-panel">
-							<fieldset><legend>Servo mode</legend>
-								<div>Set the mechanical servo mode to match the tracker's design.</div>
+							<fieldset><legend>Pan servo mode</legend>
+								<div>Select the pan mechanism to show its settings.</div>
 								<div class="mui-select mui-col-xs-12">
 									<select id="servomode" name="servomode">
-										<option value="0">2:1 geared - Servo geared for 360 degree movement</option>
-										<option value="1">Clip 180 - Standard direct driven servo limited to 180 degrees</option>
+										<option value="0">2:1 geared</option>
+										<option value="1">Clip 180</option>
+										<option value="2">Flip 180</option>
+										<option value="3">Continuous pan (compass-guided, bounded travel)</option>
 									</select>
 								</div>
 							</fieldset>
 						</div>
+						<div class="mui-panel" id="continuous-pan-panel" style="display:none;">
+							<fieldset>
+								<legend>Continuous pan: neutral and pulse limits</legend>
+								<div class="mui-textfield mui-col-xs-6">
+									<input id="pan_neutral_us" type="number" name="pan_neutral_us" min="1450" max="1550" step="1"/>
+									<label for="pan_neutral_us">Neutral pulse (us)</label>
+								</div>
+								<div class="mui-textfield mui-col-xs-6">
+									<input id="pan_left_max_offset_us" type="number" name="pan_left_max_offset_us" min="5" max="550" step="1" aria-describedby="pan_pulse_limits"/>
+									<label for="pan_left_max_offset_us">Left pulse limit (us below neutral)</label>
+								</div>
+								<div class="mui-textfield mui-col-xs-6">
+									<input id="pan_right_max_offset_us" type="number" name="pan_right_max_offset_us" min="5" max="550" step="1" aria-describedby="pan_pulse_limits"/>
+									<label for="pan_right_max_offset_us">Right pulse limit (us above neutral)</label>
+								</div>
+								<p id="pan_pulse_limits" aria-live="polite">Pulse limits must stay within 1000-2000 us.</p>
+								<p>These limits cap manual direction pulses, automatic pulse calibration, and tracking. Changing either limit or neutral requires recalibration. Pulse limits are not measured speed limits.</p>
+								<div class="mui-textfield mui-col-xs-6">
+									<input id="pan_deadband_degrees" type="number" name="pan_deadband_degrees" min="1" max="30" step="1" value="3"/>
+									<label for="pan_deadband_degrees">Tracking deadband (degrees)</label>
+								</div>
+							</fieldset>
+						</div>
 						<div class="mui-panel">
-							<fieldset><legend>Azimuth servo</legend>
-								Enter the microsecond (us) values for the min and max position of the horizontal servo, using the slider to test positions.
+							<fieldset id="positional-azimuth-options"><legend>Azimuth servo</legend>
+									Min/max position, center direction, and Fast Flip apply to geared, Clip 180, and Flip 180 modes.
 								<input type="range" id="bear" name="bear" class="aatlive" list="azim_markers" value="0" min="-180" max="180" step="45" style="width: 100%;"/>
 								<datalist id="bear_markers">
 									<option value="-180"></option>
@@ -213,7 +219,9 @@
 								</div>
 							</fieldset>
 							<fieldset><legend>Elevation servo</legend>
-								Enter the microsecond (us) values for the min and max position of the vertical servo, using the slider to test positions.
+								Enter the microsecond (us) values for the min and max position of the vertical servo.
+								<div id="positional-elevation-test">
+								Use the slider to test positions.
 								<input type="range" id="elev" name="elev" class="aatlive" list="elev_markers" value="45" min="0" max="90" step="15" style="width: 100%;"/>
 								<datalist id="elev_markers">
 									<option value="0" label="0"></option>
@@ -224,6 +232,7 @@
 									<option value="75" label=""></option>
 									<option value="90" label="90"></option>
 								</datalist>
+								</div>
 								<div class="mui-textfield mui-col-xs-3">
 									<input id="elev_min" type="number" name="elev_min" min="500" max="2500"/>
 									<label for="elev_min">Min</label>
@@ -237,17 +246,23 @@
 								</div>
 							</fieldset>
 						</div>
-						<div class="mui-panel">
-							<fieldset><legend>Battery voltage</legend>
-								<div>Battery voltage is calculated using the formula <strong>VBAT = (ADC - offset) / scale</strong>. If voltage is reading too high, increase scale.</div>
-								<div class="mui-textfield mui-col-xs-6">
-									<input id="vbat_scale" type="number" name="vbat_scale" min="1" max="1000"/>
-									<label for="vbat_scale">Scale</label>
-								</div>
-								<div class="mui-textfield mui-col-xs-6">
-									<input id="vbat_offset" type="number" name="vbat_offset" min="-1000" max="1000"/>
-									<label for="vbat_offset">Offset</label>
-								</div>
+						<div class="mui-panel" id="servo-speed-options">
+							<fieldset><legend>Servo speed</legend>
+								<span id="positional-servo-speed">Limits how quickly the servo position changes; Fast Flip may bypass it.</span>
+								<span id="continuous-servo-speed" style="display:none;">Scales the pan tracking pulse within the limits you set and limits elevation movement per update; it does not set a measured speed.</span>
+								<input type="range" id="servosmoo" name="servosmoo" list="servosmoo_markers" value="5" min="0" max="9" step="1" style="width: 100%;"/>
+								<datalist id="servosmoo_markers">
+									<option value="0" label="Fast" title="Fast"></option>
+									<option value="1" label=""></option>
+									<option value="2" label=""></option>
+									<option value="3" label=""></option>
+									<option value="4" label=""></option>
+									<option value="5" label="Medium"></option>
+									<option value="6" label=""></option>
+									<option value="7" label=""></option>
+									<option value="8" label=""></option>
+									<option value="9" label="Slow"></option>
+								</datalist>
 							</fieldset>
 						</div>
 						<div class="mui-panel">
@@ -269,9 +284,100 @@
 								</datalist>
 							</fieldset>
 						</div>
+						<div class="mui-panel">
+							<fieldset><legend>Battery voltage</legend>
+								<div>Battery voltage is calculated using the formula <strong>VBAT = (ADC - offset) / scale</strong>. If voltage is reading too high, increase scale.</div>
+								<div class="mui-textfield mui-col-xs-6">
+									<input id="vbat_scale" type="number" name="vbat_scale" min="1" max="1000"/>
+									<label for="vbat_scale">Scale</label>
+								</div>
+								<div class="mui-textfield mui-col-xs-6">
+									<input id="vbat_offset" type="number" name="vbat_offset" min="-1000" max="1000"/>
+									<label for="vbat_offset">Offset</label>
+								</div>
+							</fieldset>
+						</div>
 						<input type="hidden" name="commit" value="1"/>
-						<input type="submit" id="aatsubmit" value="Save" class="mui-btn mui-btn--primary"/>
+						<input type="submit" id="aatsubmit" value="Save AAT settings" class="mui-btn mui-btn--primary"/>
 						</form>
+						<fieldset id="continuous-pan-setup" class="mui-panel" style="display:none;">
+							<legend>Continuous pan commissioning</legend>
+							<p>Save mode 3 and the pulse settings above before commissioning. Changing modes requires a reboot.</p>
+							<p>Follow the setup boxes below in order. Do not proceed on a failed or inconclusive check.</p>
+							<button id="continuous-pan-enter-setup" type="button" class="mui-btn" style="display:none;">Enter calibration setup</button>
+							<p id="continuous-pan-summary" role="status">Waiting for AAT configuration.</p>
+							<p id="continuous-pan-fit">Compass fit: unknown</p>
+							<p id="continuous-pan-north">True-north calibration: unknown</p>
+							<p id="continuous-pan-compass">Compass runtime: waiting</p>
+							<p id="continuous-pan-gps">Aircraft GPS: waiting</p>
+							<p id="continuous-pan-reference">Reference: waiting</p>
+							<p id="continuous-pan-output">Output: waiting</p>
+						</fieldset>
+						<div id="aat-servo-test" class="mui-panel" style="display:none;">
+							<fieldset>
+								<legend>1. Compass fit</legend>
+								<p>Tracking stays disabled in setup. Secure the pan and check cable clearance before running a powered sweep. Review coverage, return mismatch, and magnetic-variation warnings before saving the fit.</p>
+								<p id="aat-servo-compass">Compass: waiting for sensor</p>
+								<p id="aat-servo-rate">Relative turn rate: --</p>
+								<p id="aat-servo-sweep">Sweep: ready</p>
+								<p id="aat-servo-sweep-hint">Arm the owner calibration, hold GPIO32 through one turn, then release at the reference mark to finish.</p>
+								<p id="aat-servo-samples">Samples: 0</p>
+								<button id="aat-servo-sweep-download" type="button" class="mui-btn" disabled>Download raw XYZ sweep CSV</button>
+								<output id="aat-servo-sweep-export-status" aria-live="polite">Available after a completed sweep; download before starting another sweep or rebooting.</output>
+								<p id="aat-servo-fit">Compass fit: not calibrated</p>
+								<p id="aat-servo-fit-quality">Fit quality: run an owner calibration</p>
+								<button id="aat-servo-sweep-start" type="button" class="mui-btn mui-btn--primary">Arm owner calibration</button>
+								<button id="aat-servo-sweep-stop" type="button" class="mui-btn" disabled>Stop</button>
+								<button id="aat-servo-calibration-save" type="button" class="mui-btn mui-btn--primary" disabled>Save compass fit</button>
+							</fieldset>
+							<fieldset>
+								<legend>2. Compass mounting response</legend>
+								<p>With servo power disconnected, mark the starting position, capture the heading, then turn the pan 90 degrees clockwise by hand (viewed from above). Validate the turn. If the compass reads backward, apply the correction and repeat the hand check before aligning true north.</p>
+								<button id="aat-servo-mount-check-start" type="button" class="mui-btn" disabled>Capture starting heading</button>
+								<button id="aat-servo-mount-check-validate" type="button" class="mui-btn mui-btn--primary" disabled>Validate +90 degree turn</button>
+								<button id="aat-servo-mount-reverse" type="button" class="mui-btn mui-btn--primary" hidden disabled>Apply reversed compass direction</button>
+								<button id="aat-servo-mount-check-reset" type="button" class="mui-btn">Reset check</button>
+								<output id="aat-servo-mount-check-status" aria-live="polite">Mounting response: required</output>
+							</fieldset>
+							<fieldset>
+								<legend>3. True-north alignment</legend>
+								<p>Point the tracker at true north and save the heading offset once.</p>
+								<p id="aat-servo-north-status">True-north alignment: required</p>
+								<button id="aat-servo-north-align" type="button" class="mui-btn mui-btn--primary" disabled>Press when device is true north</button>
+							</fieldset>
+							<fieldset>
+								<legend>4. Mechanical home reference</legend>
+								<p>With servo power disconnected, verify neutral, place the pan at its marked mechanical home (not necessarily true north), and press and release GPIO32. Repeat after each boot; GPIO32 is also used during the compass fit sweep, but that is a separate step.</p>
+								<p id="aat-servo-reference">Reference button: unknown</p>
+								<p id="aat-servo-output">Servo output: 1520 us</p>
+								<p id="aat-servo-driver">Servo driver: waiting</p>
+							</fieldset>
+							<fieldset>
+								<legend>5. Automatic minimum-motion pulse calibration</legend>
+								<p>After confirming home, secure the representative load, clear travel in both directions, and have the power disconnect within reach before powering the servo. Calibration steps outward in 5 us increments within the configured pulse limits and saves the first reliably moving pulse in each direction after returning to neutral. It does not choose a maximum speed.</p>
+								<button id="aat-servo-pulse-calibrate" type="button" class="mui-btn mui-btn--primary">Run automatic pulse calibration</button>
+								<button id="aat-servo-pulse-stop" type="button" class="mui-btn mui-btn--primary">Stop / Neutral</button>
+								<output id="aat-servo-pulse-calibration" aria-live="polite">Pulse calibration: not run</output>
+								<p>Stop / Neutral cancels setup motion and requests neutral. If the connection is lost or motion continues, disconnect servo power.</p>
+								<details>
+									<summary>Calibration limits</summary>
+									<p>Each pulse lasts at most 3 seconds and aborts at 15 degrees of raw stage travel or the +/-90 degree setup boundary. Neutral must qualify within 3 seconds and requires at least 2 seconds of heading samples spanning at most 6 degrees with at most 1.5 degrees of averaged drift. A start pulse requires three consecutive advancing 500 ms heading windows and more than 6 degrees of net averaged displacement. Opposite displacement beyond that band aborts. The whole run is limited to 10 minutes.</p>
+								</details>
+							</fieldset>
+							<fieldset>
+								<legend>6. Manual direction check (optional)</legend>
+								<p>Use a guarded pulse to verify direction with the load secured and travel clear.</p>
+								<label for="aat-servo-pulse">Guarded test pulse <output id="aat-servo-pulse-value">1520 us</output></label>
+								<input id="aat-servo-pulse" type="range" min="1000" max="2000" step="5" value="1520" style="width:100%;"/>
+								<button id="aat-servo-neutral" type="button" class="mui-btn mui-btn--primary">Stop / Neutral</button>
+								<span id="aat-servo-status" role="status">Neutral</span>
+							</fieldset>
+							<fieldset>
+								<legend>Sensor diagnostics</legend>
+								<p id="aat-servo-raw">Raw compass X/Y: --</p>
+								<p id="aat-servo-hmc">HMC: waiting for status</p>
+							</fieldset>
+						</div>
 					</div>
 				</div>
 			</div>
